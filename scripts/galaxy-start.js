@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require("node:fs");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const process = require("node:process");
@@ -27,6 +28,32 @@ function envFlag(name, defaultValue = false) {
     return defaultValue;
   }
   return /^(1|true|yes|on)$/i.test(raw.trim());
+}
+
+function parsePort(value, label) {
+  const port = Number.parseInt(value, 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`invalid ${label} value: ${value}`);
+  }
+  return port;
+}
+
+function isMyIpRouteEnabled() {
+  return envFlag("CLIPROXY_ENABLE_MY_IP_ROUTE", false) || envFlag("ENABLE_MY_IP_ROUTE", false);
+}
+
+function runtimePorts() {
+  const publicPort = parsePort(process.env.PORT || process.env.CLIPROXY_PORT || "8317", "PORT");
+  if (!isMyIpRouteEnabled()) {
+    return { publicPort, appPort: publicPort };
+  }
+
+  const defaultInternalPort = publicPort === 65535 ? 8317 : publicPort + 1;
+  const appPort = parsePort(process.env.CLIPROXY_INTERNAL_PORT || String(defaultInternalPort), "CLIPROXY_INTERNAL_PORT");
+  if (appPort === publicPort) {
+    throw new Error("CLIPROXY_INTERNAL_PORT must be different from PORT when /my-ip route is enabled");
+  }
+  return { publicPort, appPort };
 }
 
 function splitList(raw) {
@@ -137,12 +164,7 @@ function upsertRemoteAllow(yaml, allowRemoteManagement) {
   return lines.join("\n");
 }
 
-function ensureConfig() {
-  const port = Number.parseInt(process.env.PORT || process.env.CLIPROXY_PORT || "8317", 10);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(`invalid PORT value: ${process.env.PORT || process.env.CLIPROXY_PORT}`);
-  }
-
+function ensureConfig(port) {
   const configPath = path.resolve(ROOT, process.env.CLIPROXY_CONFIG_PATH || "config.yaml");
   const authDir = process.env.CLIPROXY_AUTH_DIR || "auths";
   const apiKeys = splitList(process.env.API_KEYS || process.env.CLIPROXY_API_KEYS);
@@ -310,9 +332,11 @@ async function ensureBinary() {
   return BINARY_PATH;
 }
 
-function startBinary(binaryPath, configPath) {
+function startBinary(binaryPath, configPath, appPort) {
   const env = {
     ...process.env,
+    PORT: String(appPort),
+    CLIPROXY_PORT: String(appPort),
     DEPLOY: process.env.DEPLOY || "cloud",
   };
 
@@ -337,11 +361,134 @@ function startBinary(binaryPath, configPath) {
     }
     process.exit(code || 0);
   });
+
+  return child;
+}
+
+function proxyHeaders(request, appPort) {
+  const headers = { ...request.headers };
+  for (const header of [
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ]) {
+    delete headers[header];
+  }
+
+  const remoteAddress = request.socket.remoteAddress;
+  if (remoteAddress) {
+    headers["x-forwarded-for"] = headers["x-forwarded-for"]
+      ? `${headers["x-forwarded-for"]}, ${remoteAddress}`
+      : remoteAddress;
+  }
+  headers["x-forwarded-host"] = request.headers.host || "";
+  headers.host = `127.0.0.1:${appPort}`;
+  return headers;
+}
+
+function sendJson(response, statusCode, payload) {
+  const body = JSON.stringify(payload, null, 2);
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(body);
+}
+
+async function handleMyIp(request, response) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    sendJson(response, 405, { error: "method not allowed" });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const ipResponse = await fetch("https://api.ipify.org?format=json", {
+      signal: controller.signal,
+      headers: { "User-Agent": "cliproxyapi-galaxy-launcher" },
+    });
+    const text = await ipResponse.text();
+    if (!ipResponse.ok) {
+      sendJson(response, 502, {
+        error: "ip lookup failed",
+        status: ipResponse.status,
+        body: text.slice(0, 200),
+      });
+      return;
+    }
+
+    const parsed = JSON.parse(text);
+    sendJson(response, 200, {
+      ip: parsed.ip,
+      source: "api.ipify.org",
+      checked_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    sendJson(response, 502, { error: error.message });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function proxyRequest(request, response, appPort) {
+  const proxy = http.request(
+    {
+      hostname: "127.0.0.1",
+      port: appPort,
+      path: request.url,
+      method: request.method,
+      headers: proxyHeaders(request, appPort),
+    },
+    (proxyResponse) => {
+      response.writeHead(proxyResponse.statusCode || 502, proxyResponse.statusMessage, proxyResponse.headers);
+      proxyResponse.pipe(response);
+    },
+  );
+
+  proxy.on("error", (error) => {
+    if (!response.headersSent) {
+      sendJson(response, 502, { error: "upstream unavailable", message: error.message });
+      return;
+    }
+    response.destroy(error);
+  });
+
+  request.pipe(proxy);
+}
+
+function startMyIpFrontProxy(publicPort, appPort) {
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    if (url.pathname === "/my-ip") {
+      handleMyIp(request, response);
+      return;
+    }
+    proxyRequest(request, response, appPort);
+  });
+
+  server.on("upgrade", (request, socket) => {
+    socket.destroy();
+  });
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.keepAliveTimeout = 65000;
+
+  server.listen(publicPort, "0.0.0.0", () => {
+    log(`front proxy listening on ${publicPort}; forwarding app traffic to 127.0.0.1:${appPort}`);
+    log("temporary /my-ip route enabled");
+  });
 }
 
 async function main() {
   const checkOnly = process.argv.includes("--check");
-  const configPath = ensureConfig();
+  const ports = runtimePorts();
+  const configPath = ensureConfig(ports.appPort);
 
   if (checkOnly) {
     log("launcher check completed");
@@ -349,7 +496,10 @@ async function main() {
   }
 
   const binaryPath = await ensureBinary();
-  startBinary(binaryPath, configPath);
+  startBinary(binaryPath, configPath, ports.appPort);
+  if (isMyIpRouteEnabled()) {
+    startMyIpFrontProxy(ports.publicPort, ports.appPort);
+  }
 }
 
 main().catch((error) => {
