@@ -44,6 +44,13 @@ function isMyIpRouteEnabled() {
     || envFlag("CLIPROXY_MY_IP_ONLY", false);
 }
 
+function isMyIpOnlyMode() {
+  if (envFlag("CLIPROXY_ENABLE_MY_IP_ROUTE", false) || envFlag("ENABLE_MY_IP_ROUTE", false)) {
+    return false;
+  }
+  return envFlag("CLIPROXY_MY_IP_ONLY", false);
+}
+
 function runtimePorts() {
   const publicPort = parsePort(process.env.PORT || process.env.CLIPROXY_PORT || "8317", "PORT");
   if (!isMyIpRouteEnabled()) {
@@ -498,7 +505,7 @@ function startMyIpFrontProxy(publicPort, appPort, options = {}) {
 
 async function main() {
   const checkOnly = process.argv.includes("--check");
-  const myIpOnly = envFlag("CLIPROXY_MY_IP_ONLY", false);
+  const myIpOnly = isMyIpOnlyMode();
   const ports = runtimePorts();
   const configPath = ensureConfig(ports.appPort);
 
