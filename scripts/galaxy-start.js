@@ -39,7 +39,9 @@ function parsePort(value, label) {
 }
 
 function isMyIpRouteEnabled() {
-  return envFlag("CLIPROXY_ENABLE_MY_IP_ROUTE", false) || envFlag("ENABLE_MY_IP_ROUTE", false);
+  return envFlag("CLIPROXY_ENABLE_MY_IP_ROUTE", false)
+    || envFlag("ENABLE_MY_IP_ROUTE", false)
+    || envFlag("CLIPROXY_MY_IP_ONLY", false);
 }
 
 function runtimePorts() {
@@ -436,7 +438,12 @@ async function handleMyIp(request, response) {
   }
 }
 
-function proxyRequest(request, response, appPort) {
+function proxyRequest(request, response, appPort, options = {}) {
+  if (options.myIpOnly) {
+    sendJson(response, 404, { error: "only /my-ip is enabled in CLIPROXY_MY_IP_ONLY mode" });
+    return;
+  }
+
   const proxy = http.request(
     {
       hostname: "127.0.0.1",
@@ -462,14 +469,18 @@ function proxyRequest(request, response, appPort) {
   request.pipe(proxy);
 }
 
-function startMyIpFrontProxy(publicPort, appPort) {
+function startMyIpFrontProxy(publicPort, appPort, options = {}) {
   const server = http.createServer((request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    if (url.pathname === "/" || url.pathname === "/healthz") {
+      sendJson(response, 200, { status: "ok" });
+      return;
+    }
     if (url.pathname === "/my-ip") {
       handleMyIp(request, response);
       return;
     }
-    proxyRequest(request, response, appPort);
+    proxyRequest(request, response, appPort, options);
   });
 
   server.on("upgrade", (request, socket) => {
@@ -487,11 +498,18 @@ function startMyIpFrontProxy(publicPort, appPort) {
 
 async function main() {
   const checkOnly = process.argv.includes("--check");
+  const myIpOnly = envFlag("CLIPROXY_MY_IP_ONLY", false);
   const ports = runtimePorts();
   const configPath = ensureConfig(ports.appPort);
 
   if (checkOnly) {
     log("launcher check completed");
+    return;
+  }
+
+  if (myIpOnly) {
+    log("CLIPROXY_MY_IP_ONLY enabled; skipping CLIProxyAPI binary startup");
+    startMyIpFrontProxy(ports.publicPort, ports.appPort, { myIpOnly: true });
     return;
   }
 
