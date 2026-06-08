@@ -93,6 +93,9 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 
 func WriteConfig(path string, data []byte) error {
 	data = config.NormalizeCommentIndentation(data)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err

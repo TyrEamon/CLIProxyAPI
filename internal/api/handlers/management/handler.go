@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -19,6 +20,10 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
 )
+
+type configPersister interface {
+	PersistConfig(ctx context.Context) error
+}
 
 type attemptInfo struct {
 	count        int
@@ -293,8 +298,29 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	if err := h.persistConfigStore(c.Request.Context()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to persist config: %v", err)})
+		return false
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
+}
+
+func (h *Handler) persistConfigStore(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	store := h.tokenStoreWithBaseDir()
+	persister, ok := store.(configPersister)
+	if !ok || persister == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctxPersist, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return persister.PersistConfig(ctxPersist)
 }
 
 // Helper methods for simple types

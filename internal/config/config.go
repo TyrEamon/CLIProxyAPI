@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -1066,10 +1067,20 @@ func hashSecret(secret string) (string, error) {
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	persistCfg := cfg
+	if err := os.MkdirAll(filepath.Dir(configFile), 0o700); err != nil {
+		return err
+	}
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return err
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		rendered, errMarshal := yaml.Marshal(persistCfg)
+		if errMarshal != nil {
+			return errMarshal
+		}
+		return os.WriteFile(configFile, NormalizeCommentIndentation(rendered), 0o600)
 	}
 
 	var original yaml.Node
