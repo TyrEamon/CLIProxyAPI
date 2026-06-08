@@ -1,6 +1,13 @@
 package cliproxy
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+)
 
 func TestFileWatcherDisabledFromEnv(t *testing.T) {
 	tests := []struct {
@@ -24,5 +31,31 @@ func TestFileWatcherDisabledFromEnv(t *testing.T) {
 				t.Fatalf("fileWatcherDisabledFromEnv() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestServiceAuthHookRegistersModels(t *testing.T) {
+	authID := "test-antigravity-hook"
+	GlobalModelRegistry().UnregisterClient(authID)
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(authID) })
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+	manager.SetHook(serviceAuthHook{service: service})
+
+	_, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       authID,
+		Provider: "antigravity",
+		Status:   coreauth.StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	if got := registry.GetGlobalRegistry().GetModelsForClient(authID); len(got) == 0 {
+		t.Fatal("expected antigravity models to be registered for auth")
 	}
 }

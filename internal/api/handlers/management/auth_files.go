@@ -758,20 +758,11 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if !filepath.IsAbs(full) {
-				if abs, errAbs := filepath.Abs(full); errAbs == nil {
-					full = abs
-				}
+			if _, _, errDelete := h.deleteAuthFileByName(ctx, name); errDelete != nil {
+				c.JSON(500, gin.H{"error": errDelete.Error()})
+				return
 			}
-			if err = os.Remove(full); err == nil {
-				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
-					c.JSON(500, gin.H{"error": errDel.Error()})
-					return
-				}
-				deleted++
-				h.disableAuth(ctx, full)
-			}
+			deleted++
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
@@ -966,14 +957,17 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
-	if errRemove := os.Remove(targetPath); errRemove != nil {
-		if os.IsNotExist(errRemove) {
+	if _, errStat := os.Stat(targetPath); errStat != nil {
+		if os.IsNotExist(errStat) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
 		}
-		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
+		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to inspect file: %w", errStat)
 	}
 	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
 		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
+	}
+	if errRemove := os.Remove(targetPath); errRemove != nil && !os.IsNotExist(errRemove) {
+		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
 	}
 	if targetID != "" {
 		h.disableAuth(ctx, targetID)

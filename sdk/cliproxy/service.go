@@ -137,6 +137,26 @@ func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 	go s.consumeAuthUpdates(queueCtx)
 }
 
+type serviceAuthHook struct {
+	service *Service
+}
+
+func (h serviceAuthHook) OnAuthRegistered(ctx context.Context, auth *coreauth.Auth) {
+	if h.service == nil {
+		return
+	}
+	h.service.rebindAuthModels(ctx, auth)
+}
+
+func (h serviceAuthHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth) {
+	if h.service == nil {
+		return
+	}
+	h.service.rebindAuthModels(ctx, auth)
+}
+
+func (h serviceAuthHook) OnResult(context.Context, coreauth.Result) {}
+
 func (s *Service) consumeAuthUpdates(ctx context.Context) {
 	ctx = coreauth.WithSkipPersist(ctx)
 	for {
@@ -158,6 +178,31 @@ func (s *Service) consumeAuthUpdates(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+func (s *Service) rebindAuthModels(ctx context.Context, auth *coreauth.Auth) {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !auth.Disabled {
+		s.ensureExecutorsForAuth(auth)
+	}
+	s.registerModelsForAuth(auth)
+	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
+	s.coreManager.RefreshSchedulerEntry(auth.ID)
+}
+
+func (s *Service) rebindLoadedAuthModels(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	auths := s.coreManager.List()
+	for _, auth := range auths {
+		s.rebindAuthModels(ctx, auth)
 	}
 }
 
@@ -771,6 +816,9 @@ func (s *Service) Run(ctx context.Context) error {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
+	if s.coreManager != nil {
+		s.coreManager.SetHook(serviceAuthHook{service: s})
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -792,6 +840,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
+		s.rebindLoadedAuthModels(ctx)
 	}
 
 	if !homeEnabled {

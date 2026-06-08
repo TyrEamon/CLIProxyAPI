@@ -218,6 +218,19 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	return manager
 }
 
+// SetHook replaces the lifecycle hook used for auth changes.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
+	m.mu.Unlock()
+}
+
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
 	case *RoundRobinSelector, *FillFirstSelector:
