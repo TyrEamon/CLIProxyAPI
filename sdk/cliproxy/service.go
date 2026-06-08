@@ -912,7 +912,9 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnAfterStart(s)
 	}
 
-	if !homeEnabled {
+	if !homeEnabled && fileWatcherDisabledFromEnv() {
+		log.Warn("file watcher disabled by CLIPROXY_DISABLE_FILE_WATCHER; config and auth changes require restart")
+	} else if !homeEnabled {
 		var watcherWrapper *WatcherWrapper
 		reloadCallback := func(newCfg *config.Config) { s.applyConfigUpdate(newCfg) }
 
@@ -948,6 +950,15 @@ func (s *Service) Run(ctx context.Context) error {
 		return ctx.Err()
 	case errServer := <-s.serverErr:
 		return errServer
+	}
+}
+
+func fileWatcherDisabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CLIPROXY_DISABLE_FILE_WATCHER"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
